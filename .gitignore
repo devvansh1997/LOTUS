@@ -1,0 +1,21 @@
+# data and model artifacts
+*.pt
+*.pth
+*.npz
+*.npy
+*.safetensors
+data/
+data-*/
+
+# results and logs
+results/
+slurm_logs/
+*.out
+*.err
+*.log
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/

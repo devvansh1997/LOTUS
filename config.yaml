@@ -1,0 +1,66 @@
+# ==============================================================================
+# HOSVD Hallucination Detection -- Configuration
+# ==============================================================================
+# Matches HARP's evaluation protocol:
+#   - No system prompt (minimal prompt templates per dataset)
+#   - 10-beam search per prompt
+#   - Contrastive BLEURT/ROUGE judge vs correct + incorrect answers
+#   - Known/unknown split: 75% known -> train, 25% known + all unknown -> valid
+
+models:
+  # HARP evaluates the BASE Llama, not the Instruct variant: main.py:20 points its
+  # "Llama-3.1-8B" entry at meta-llama/Llama-3.1-8B, and the paper (S5.1) says the same. This
+  # entry is the like-for-like one; llama-3.1-8b-instruct below is a different model that we
+  # keep because it is already generated and the base/instruct gap is itself informative.
+  # NOTE: gated repo -- the HF token must be valid on the compute node, not just the login node.
+  - id: "meta-llama/Llama-3.1-8B"
+    folder: "llama-3.1-8b"
+  - id: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    folder: "llama-3.1-8b-instruct"
+  - id: "Qwen/Qwen2.5-7B-Instruct"
+    folder: "qwen-2.5-7b-instruct"
+
+datasets:
+  - name: "truthfulqa"
+    hf_path: "truthfulqa/truthful_qa"
+    hf_config: "generation"
+    prompt_template: "Q: {question}\nA:"
+  - name: "triviaqa"
+    hf_path: "mandarjoshi/trivia_qa"
+    hf_config: "rc.nocontext"
+    prompt_template: "Q: {question}\nA:"
+  - name: "nq_open"
+    hf_path: "google-research-datasets/nq_open"
+    hf_config: null
+    prompt_template: "Q: {question}\nA:"
+  - name: "tydiqa_gp"
+    hf_path: "google-research-datasets/tydiqa"
+    hf_config: "secondary_task"
+    prompt_template: "Concisely answer the following question based on the information in the given passage:\nPassage:\n{context}\nQ: {question}\nA:"
+
+# Judge parameters (HARP contrastive rubric)
+judge:
+  bleurt_model: "BLEURT-20"
+  sen_sim_threshold: 0.5
+  rouge_threshold: 0.7
+  correct_advantage: -1.0
+
+# Generation parameters (HARP beam search)
+generation:
+  max_new_tokens: 64
+  temperature: 0.5
+  top_k: 5
+  top_p: 0.99
+  num_beams: 10
+  num_return_sequences: 10
+  do_sample: true
+
+# HOSVD parameters
+hosvd:
+  layer_rank: 5
+  hidden_rank: 64
+
+# Output
+output:
+  data_dir: "../data"
+  dataset_ratio: 1.0

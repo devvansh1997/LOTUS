@@ -1,0 +1,7 @@
+* text=auto
+
+# these run on a Linux cluster; CRLF in a shebang line breaks the interpreter
+*.sh    text eol=lf
+*.slurm text eol=lf
+*.py    text eol=lf
+*.yaml  text eol=lf

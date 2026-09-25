@@ -1,0 +1,147 @@
+#!/bin/bash
+# submit_pipeline.sh -- queue an entire model's pipeline as one dependency graph.
+#
+#   bash submit_pipeline.sh llama-3.1-8b
+#
+# Submits and returns immediately. SLURM runs the rest: nothing else to babysit, and the last
+# job prints a consolidated data + inference summary.
+#
+# WHY A GRAPH AND NOT ONE BIG JOB
+#   Stages want different machines -- generation and extraction need a GPU, the phase-3 evals
+#   are pure CPU. One monolithic job would hold a GPU idle through hours of CPU work, need a
+#   single ~30h wall limit, and lose everything if it died near the end. As a graph the three
+#   datasets run side by side and the whole thing lands in roughly 15h instead of ~40h.
+#
+# WHAT IS DELIBERATELY *NOT* PARALLEL, and why (each of these is a real race we hit or found):
+#   1. prefetch  the model is gated and ~16GB; three cold generation jobs would pull it into the
+#                same HF cache simultaneously. Everything waits on this one.
+#   2. adapter   49_harp_adapter.py:287 writes ONE adapter_summary.json per model, so it runs
+#                once with --dataset all, after every generation has finished.
+#   3. harp      main.py:109 keys its lm_head SVD cache on the MODEL, not the dataset, and
+#                main.py:64-68 mkdir() is check-then-create. The first dataset runs alone to
+#                materialise both; the rest then fan out safely.
+#
+# TriviaQA is excluded by default -- it is ~10x the others and belongs in its own submission.
+# Add it with:  DATASETS="tydiqa_gp truthfulqa nq_open triviaqa" bash submit_pipeline.sh <model>
+
+set -euo pipefail
+
+MODEL="${1:?usage: submit_pipeline.sh <model_folder>   e.g. llama-3.1-8b}"
+DATASETS="${DATASETS:-tydiqa_gp truthfulqa nq_open}"
+REPO_SLURM="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slurm/pipe_stage.slurm"
+
+GPU_PART="${GPU_PART:-highgpu}"
+CPU_PART="${CPU_PART:-normal}"
+
+# Sets the global JOBID rather than echoing. Called as J=$(sub ...) the function runs in a
+# subshell, so an `exit` on a rejected sbatch kills only that subshell and the caller carries on.
+# That is not hypothetical: the sibling driver printed "Queued 14 jobs" after all 14 submissions
+# were rejected. A driver must never report success for work it did not queue.
+JOBID=""
+sub() {  # sub "<sbatch opts>" <stage> [dataset] ; sets JOBID
+    local opts="$1"; shift
+    local out
+    if ! out=$(sbatch --parsable $opts "$REPO_SLURM" "$@" 2>&1); then
+        echo "" >&2
+        echo "ERROR: sbatch rejected this job -- nothing further has been queued." >&2
+        printf '  %s\n' "$out" >&2
+        echo "  opts: $opts" >&2
+        echo "  args: $*" >&2
+        exit 1
+    fi
+    [ -n "$out" ] || { echo "ERROR: sbatch returned an empty job id" >&2; exit 1; }
+    JOBID="$out"
+}
+
+echo "model=$MODEL   datasets=$DATASETS"
+echo "stage script: $REPO_SLURM"
+echo
+
+# --- 1. prefetch (serialised: gated ~16GB download, once) ----------------------------------
+sub "-p $CPU_PART --mem=32G --time=02:00:00 --job-name=pre-$MODEL" prefetch "$MODEL"
+J_PRE=$JOBID
+echo "prefetch            -> $J_PRE"
+
+GEN_IDS=(); EVAL_IDS=()
+for DS in $DATASETS; do
+    # TriviaQA is ~10x the others (9,960 prompts vs 440-3,610) and needs its own budget.
+    # A 6h limit killed gen-triviaqa at 77.6% after 5h58m -- and 39_generate_dataset.py has no
+    # checkpointing, so a timeout discards the whole run rather than resuming. Budget generously:
+    # an over-long limit costs nothing but queue priority, an under-long one costs GPU-hours.
+    # Extraction accumulates every beam's raw per-token states in RAM before sharding them out,
+    # so its footprint scales with beams x tokens x layers x D. ext-triviaqa was OOM-killed at
+    # 100G; the equivalent Qwen job (slurm/ext_qwen_triviaqa.slurm) asked for 180G, and LLaMA is
+    # 14% wider again (D=4096 vs 3584), so 256G.
+    case "$DS" in
+        triviaqa) GEN_TIME=16:00:00; EXT_TIME=12:00:00; EXT_MEM=256G ;;
+        *)        GEN_TIME=06:00:00; EXT_TIME=06:00:00; EXT_MEM=100G ;;
+    esac
+    # --- 2. generate + validate (GPU) ------------------------------------------------------
+    sub "-p $GPU_PART --gres=gpu:1 --mem=80G --time=$GEN_TIME \
+                 --dependency=afterok:$J_PRE --job-name=gen-$DS" gen "$MODEL" "$DS"
+    J_GEN=$JOBID
+    # --- 3. extract features (GPU) ---------------------------------------------------------
+    sub "-p $GPU_PART --gres=gpu:1 --mem=$EXT_MEM --time=$EXT_TIME \
+                 --dependency=afterok:$J_GEN --job-name=ext-$DS" extract "$MODEL" "$DS"
+    J_EXT=$JOBID
+    # --- 4. evaluate, BOTH split protocols (CPU) -------------------------------------------
+    # SKIP_EVAL=1 leaves this stage out. Needed for TriviaQA: measured per-condition times on
+    # that dataset run 2h-7h EACH, so all six across both protocols is 40h+ and joint_tensor
+    # alone OOM'd at 200G. It does not fit one job and must be fanned out per condition.
+    if [ "${SKIP_EVAL:-0}" = "1" ]; then
+        GEN_IDS+=("$J_GEN")
+        printf "  %-11s gen->%s  extract->%s  eval->SKIPPED\n" "$DS" "$J_GEN" "$J_EXT"
+        continue
+    fi
+    sub "-p $CPU_PART --mem=100G --time=24:00:00 \
+                 --dependency=afterok:$J_EXT --job-name=evl-$DS" eval "$MODEL" "$DS"
+    J_EVL=$JOBID
+    GEN_IDS+=("$J_GEN"); EVAL_IDS+=("$J_EVL")
+    printf "  %-11s gen->%s  extract->%s  eval->%s\n" "$DS" "$J_GEN" "$J_EXT" "$J_EVL"
+done
+
+# --- 5. adapter, once, after ALL generations ------------------------------------------------
+DEP_GEN=$(IFS=:; echo "${GEN_IDS[*]}")
+sub "-p $CPU_PART --mem=32G --time=04:00:00 \
+             --dependency=afterok:$DEP_GEN --job-name=adp-$MODEL" adapter "$MODEL"
+J_ADP=$JOBID
+echo "adapter (all ds)    -> $J_ADP"
+
+# --- 6. HARP: first dataset alone to build the model-keyed SVD, then the rest ---------------
+FIRST=$(echo $DATASETS | cut -d' ' -f1)
+# -s matters: without it, cut returns the WHOLE line when the delimiter is absent, so a
+# single-dataset run (DATASETS="triviaqa") set REST=triviaqa and submitted its harp stage twice.
+REST=$(echo $DATASETS | cut -s -d' ' -f2-)
+sub "-p $GPU_PART --gres=gpu:1 --mem=200G --time=12:00:00 \
+            --dependency=afterok:$J_ADP --job-name=harp-$FIRST" harp "$MODEL" "$FIRST"
+J_H1=$JOBID
+echo "harp $FIRST (svd)   -> $J_H1"
+HARP_IDS=("$J_H1")
+for DS in $REST; do
+    sub "-p $GPU_PART --gres=gpu:1 --mem=200G --time=12:00:00 \
+               --dependency=afterok:$J_H1 --job-name=harp-$DS" harp "$MODEL" "$DS"
+    J_H=$JOBID
+    HARP_IDS+=("$J_H")
+    echo "harp $DS           -> $J_H"
+done
+
+# --- 7. summary, after everything ------------------------------------------------------------
+# Built as an array rather than string-joined: with SKIP_EVAL=1 the EVAL_IDS array is empty, and
+# "${EVAL_IDS[*]}:${HARP_IDS[*]}" would emit a leading colon -- a malformed --dependency that
+# sbatch rejects.
+DEP_IDS=()
+[ ${#EVAL_IDS[@]} -gt 0 ] && DEP_IDS+=("${EVAL_IDS[@]}")
+DEP_IDS+=("${HARP_IDS[@]}")
+DEP_ALL=$(IFS=:; echo "${DEP_IDS[*]}")
+sub "-p $CPU_PART --mem=32G --time=01:00:00 \
+             --dependency=afterany:$DEP_ALL --job-name=sum-$MODEL" summary "$MODEL"
+J_SUM=$JOBID
+echo "summary             -> $J_SUM"
+echo
+echo "Queued. Watch with:  squeue -u \$USER"
+echo "Final report lands in the log for job $J_SUM, and in"
+echo "  results/$MODEL/pipeline_summary.json"
+echo
+echo "NOTE: summary uses afterany, so it still runs (and reports what is missing) even if a"
+echo "      branch fails. Every other dependency is afterok -- a failed stage stops its own"
+echo "      branch rather than feeding a later stage half-written inputs."
