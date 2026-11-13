@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lotus-hallucination"
+version = "0.1.0"
+description = "LOTUS: hallucination detection from order statistics of an LLM's hidden states"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "scikit-learn>=1.2",
+    "joblib",
+    "tqdm",
+    "torch>=2.0",
+    "transformers>=4.40",
+]
+
+[project.scripts]
+lotus = "lotus.cli:main"
+
+[tool.setuptools]
+packages = ["lotus"]
