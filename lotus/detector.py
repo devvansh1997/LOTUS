@@ -102,7 +102,8 @@ class Lotus:
             self.scalers_[name] = params
             self.bases_[name] = tucker2_bases(Xs, r_layer, r_channel, self.seed + i)
         self.trained_on_ = {"n_layers": int(feats.n_layers), "hidden_size": int(feats.hidden_size),
-                            "blocks": feats.meta.get("blocks"), "model": feats.meta.get("model")}
+                            "blocks": feats.meta.get("blocks"), "model": feats.meta.get("model"),
+                            "questions": np.unique(feats.question_ids).tolist()}
         return self
 
     def transform(self, feats):

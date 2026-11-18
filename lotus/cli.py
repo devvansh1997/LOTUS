@@ -207,6 +207,11 @@ def cmd_score(args):
         r = report(scores, feats.labels, feats.question_ids)
         print("these responses have labels: pooled AUROC %s, within-question %s"
               % (_pct(r["pooled_auroc"]), _pct(r["within_question_auroc"])))
+        questions = np.unique(feats.question_ids).tolist()
+        seen_before = len(set(questions) & set(seen.get("questions", [])))
+        if seen_before:
+            print("warning: %d of these %d questions were used to train this detector, so these AUROCs "
+                  "are inflated; use lotus evaluate for a fair estimate" % (seen_before, len(questions)))
     return 0
 
 

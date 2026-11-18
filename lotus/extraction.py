@@ -78,6 +78,20 @@ def resolve_device(device):
     return device
 
 
+def _from_pretrained(name, **kwargs):
+    """A text model, or a vision-language model read as text (AutoModelForCausalLM refuses those)."""
+    from transformers import AutoModelForCausalLM
+
+    try:
+        return AutoModelForCausalLM.from_pretrained(name, **kwargs)
+    except ValueError as e:
+        if "Unrecognized configuration class" not in str(e):
+            raise
+    from transformers import AutoModelForImageTextToText
+
+    return AutoModelForImageTextToText.from_pretrained(name, **kwargs)
+
+
 def load_model(name, device=None, dtype="auto", trust_remote_code=False):
     """(model, tokenizer) from a Hugging Face id or a local directory, in eval mode.
 
@@ -85,7 +99,7 @@ def load_model(name, device=None, dtype="auto", trust_remote_code=False):
     accelerate package). dtype auto: bfloat16 on GPUs that support it, else float16; float32 on CPU."""
     import torch
     import transformers
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     device = resolve_device(device)
     if dtype == "auto":
@@ -99,7 +113,7 @@ def load_model(name, device=None, dtype="auto", trust_remote_code=False):
     kwargs["dtype" if _version_tuple(transformers) >= (4, 56) else "torch_dtype"] = torch_dtype
     if device == "auto":
         kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(name, **kwargs)
+    model = _from_pretrained(name, **kwargs)
     if device != "auto":
         model = model.to(device)
     model.eval()

@@ -25,8 +25,14 @@ fitting and evaluation run on a CPU.
 
 ### Install
 
-Python 3.9 or later. Install PyTorch for your CUDA version first (https://pytorch.org), then, from a
-clone of this repository:
+Use a fresh environment with Python 3.10 or later:
+
+```bash
+conda create -n lotus python=3.10 -y
+conda activate lotus
+```
+
+Install PyTorch for your CUDA version (https://pytorch.org), then, from a clone of this repository:
 
 ```bash
 pip install -e .

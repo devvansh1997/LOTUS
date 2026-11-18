@@ -7,14 +7,14 @@ name = "lotus-hallucination"
 version = "0.1.0"
 description = "LOTUS: hallucination detection from order statistics of an LLM's hidden states"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.22",
     "scikit-learn>=1.2",
     "joblib",
     "tqdm",
     "torch>=2.0",
-    "transformers>=4.40",
+    "transformers>=4.56",
 ]
 
 [project.scripts]

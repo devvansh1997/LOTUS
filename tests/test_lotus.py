@@ -379,6 +379,31 @@ def test_extract_on_gpu():
         assert np.corrcoef(a, b)[0, 1] > 0.99, k
 
 
+def test_load_model_reads_vision_language_models():
+    """AutoModelForCausalLM refuses vision-language models; the loader must fall back, not stop."""
+    import transformers
+
+    d = tiny_model_dir()
+    text_auto, vision_auto = transformers.AutoModelForCausalLM, transformers.AutoModelForImageTextToText
+
+    class Refuses:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            raise ValueError("Unrecognized configuration class <X> for this kind of AutoModel")
+
+    class Reads:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return text_auto.from_pretrained(*args, **kwargs)
+
+    transformers.AutoModelForCausalLM, transformers.AutoModelForImageTextToText = Refuses, Reads
+    try:
+        model, _ = lotus.load_model(d, device="cpu", dtype="float32")
+    finally:
+        transformers.AutoModelForCausalLM, transformers.AutoModelForImageTextToText = text_auto, vision_auto
+    assert type(model).__name__ == "LlamaForCausalLM"
+
+
 def test_cli_end_to_end():
     d = tiny_model_dir()
     work = tmpdir("lotus_cli_")
@@ -419,7 +444,8 @@ def test_cli_end_to_end():
     assert [s["test_rows"] for s in other_doc["per_seed"]] == [s["test_rows"] for s in lotus_doc["per_seed"]]
     det_path = os.path.join(work, "det.joblib")
     run("fit", "--features", feats_path, "--out", det_path)
-    run("score", "--detector", det_path, "--features", feats_path, "--out", os.path.join(work, "s.txt"))
+    out = run("score", "--detector", det_path, "--features", feats_path, "--out", os.path.join(work, "s.txt")).stdout
+    assert "used to train this detector" in out, out
     assert len(np.loadtxt(os.path.join(work, "s.txt"))) == len(rows)
     err = run("evaluate", "--features", feats_path, "--scores", scores_path, code=2).stderr
     assert err.startswith("error:"), err
